@@ -1,9 +1,14 @@
+#include <avr/io.h>
+#include <util/delay.h>
+
 #include <Adafruit_NeoPixel.h>
 #include <IRremote.h>
 
 const int IR_DECODER_PIN = 2;
 const int NEOPIXEL_PIN = 3;
-const int LED_PIN = 4;
+const int LED_PIN = 13;
+const int DEBUG1_PIN = 12;
+const int DEBUG2_PIN = 11;
 
 const int BRIGHTNESS_PIN = 1;
 const int NEOPIXEL_N = 8;
@@ -20,6 +25,7 @@ enum {
 
 struct State {
     State() :
+	pixel(0),
 	hue(0),
 	red(0),
 	green(0),
@@ -27,6 +33,8 @@ struct State {
 	toggle(0),
 	brightness(BRIGHTNESS_DEFAULT),
 	fadeDelayMillis(FADE_DELAY_DEFAULT) {}
+
+    uint16_t pixel;
 
     int hue;
     int red, green, blue;
@@ -36,15 +44,15 @@ struct State {
     int fadeDelayMillis;
 
     static const int BRIGHTNESS_FULL_WHACK = 255;
-    static const int BRIGHTNESS_DEFAULT = BRIGHTNESS_FULL_WHACK / 4;
-    static const int BRIGHTNESS_INCREMENT = 1;
-    static const int BRIGHTNESS_MAX = BRIGHTNESS_FULL_WHACK - 10;
     static const int BRIGHTNESS_MIN = 10;
+    static const int BRIGHTNESS_MAX = BRIGHTNESS_FULL_WHACK - 10;
+    static const int BRIGHTNESS_INCREMENT = 5;
+    static const int BRIGHTNESS_DEFAULT = BRIGHTNESS_FULL_WHACK / 4;
 
-    static const int FADE_DELAY_DEFAULT = 200;
-    static const int FADE_DELAY_INCREMENT = 20;
-    static const int FADE_DELAY_MIN = 20;
+    static const int FADE_DELAY_INCREMENT = 25;
+    static const int FADE_DELAY_MIN = 25;
     static const int FADE_DELAY_MAX = 2000;
+    static const int FADE_DELAY_DEFAULT = 25;
 };
 
 Adafruit_NeoPixel strip(NEOPIXEL_N, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
@@ -55,13 +63,13 @@ State state;
 long t_fade0 = 0;
 long t_brightness0 = 0;
 
-void blink()
+void blink(int pin)
 {
     for (int i = 0; i < 3; i++) {
-	digitalWrite(LED_PIN, HIGH);
-	delay(250);
-	digitalWrite(LED_PIN, LOW);
-	delay(250);
+	digitalWrite(pin, HIGH);
+	delay(150);
+	digitalWrite(pin, LOW);
+	delay(150);
     }
 }
 
@@ -76,9 +84,13 @@ void setup()
     // indicator led
     pinMode(LED_PIN, OUTPUT);
     delay(10);
-    blink();
+    blink(LED_PIN);
+
+    pinMode(DEBUG1_PIN, OUTPUT);
+    pinMode(DEBUG2_PIN, OUTPUT);
 
     // ir receiver
+    irrecv.blink13(false);
     irrecv.enableIRIn();
 
     // neopixel strip
@@ -155,42 +167,70 @@ void irinterpret(State *state, const decode_results *r)
 	int toggle = (r->value & 0x800) != 0;
 
 	if (toggle != state->toggle) {
-	    // s->toggle = toggle;
+	    state->toggle = toggle;
 
-	    // switch (r->value & 0xff) {
-	    // case ON_OFF:
-	    // 	s->run1 = (s->run1 != 0) ? 0 : MOTOR1_MIN;
-	    // 	break;
-	    // }
+	    switch (r->value & 0xff) {
+	    case MUTE:
+		state->brightness = state->brightness == State::BRIGHTNESS_MIN 
+		    ? State::BRIGHTNESS_MAX
+		    : State::BRIGHTNESS_MIN;
+		break;
+
+	    case TV_AV:
+		state->fadeDelayMillis = State::FADE_DELAY_MAX
+		    ? State::FADE_DELAY_MIN
+		    : State::FADE_DELAY_MAX;
+		break;
+	    }
 	}
 
 	switch (r->value & 0xff) {
 	case TV_AV:
-	    // // turn servo left (min)
-	    // s->turn = -STEERING_DIFF_US / STEERING_STEP_US;
-	    // s->timestamp = millis();
-	    break;
-	case MUTE:
+	    if (state->fadeDelayMillis == State::FADE_DELAY_MIN) {
+		state->fadeDelayMillis = State::FADE_DELAY_MAX;
+	    } else {
+		state->fadeDelayMillis = State::FADE_DELAY_MIN;
+	    }
 	    break;
 
+
 	case CHANNEL_UP:
-	    state->fadeDelayMillis =
-		max(state->fadeDelayMillis - State::FADE_DELAY_INCREMENT, State::FADE_DELAY_MIN);
+	    // faster
+	    if (state->fadeDelayMillis - State::FADE_DELAY_INCREMENT <= State::FADE_DELAY_MIN) {
+		state->fadeDelayMillis = State::FADE_DELAY_MIN;
+		blink(DEBUG2_PIN);
+	    } else {
+		state->fadeDelayMillis -= State::FADE_DELAY_INCREMENT;
+
+	    }
 	    break;
 
 	case CHANNEL_DOWN:
-	    state->fadeDelayMillis =
-		min(state->fadeDelayMillis + State::FADE_DELAY_INCREMENT, State::FADE_DELAY_MAX);
+	    // slower
+	    if (state->fadeDelayMillis + State::FADE_DELAY_INCREMENT >= State::FADE_DELAY_MAX) {
+		state->fadeDelayMillis = State::FADE_DELAY_MAX;
+		blink(DEBUG2_PIN);
+	    } else {
+		state->fadeDelayMillis += State::FADE_DELAY_INCREMENT;
+	    }
 	    break;
 
 	case VOLUME_UP:
-	    state->brightness = 
-		min(state->brightness + State::BRIGHTNESS_INCREMENT, State::BRIGHTNESS_MAX);
+	    if (state->brightness + State::BRIGHTNESS_INCREMENT >= State::BRIGHTNESS_MAX) {
+		state->brightness = State::BRIGHTNESS_MAX;
+		blink(DEBUG2_PIN);
+	    } else {
+		state->brightness += State::BRIGHTNESS_INCREMENT;
+	    }
 	    break;
 
 	case VOLUME_DOWN:
-	    state->brightness = 
-		max(state->brightness - State::BRIGHTNESS_INCREMENT, State::BRIGHTNESS_MIN);
+	    if (state->brightness - State::BRIGHTNESS_INCREMENT <= State::BRIGHTNESS_MIN) {
+		state->brightness = State::BRIGHTNESS_MIN;
+		blink(DEBUG2_PIN);
+	    } else {
+		state->brightness -= State::BRIGHTNESS_INCREMENT;
+	    }
 	    break;
 	}
     }
@@ -201,31 +241,34 @@ void loop()
     long t_fade = 0;
     long t_brightness = 0;
 
-
     if (irrecv.decode(&irresults)) {
 	irinterpret(&state, &irresults);
 	irrecv.resume(); 
     }
     
-    if ((t_brightness = millis()) - t_brightness0 > 100) {
-	t_brightness0 = t_brightness;
-	setBrightness(&state);
+    long t = millis();
+
+    if ((t_brightness = t) - t_brightness0 > 20) {
+    	t_brightness0 = t_brightness;
+    	setBrightness(&state);
     }
 
-    if ((t_fade = millis()) - t_fade0 > state.fadeDelayMillis) {
+    if ((t_fade = t) - t_fade0 > state.fadeDelayMillis) {
 	t_fade0 = t_fade;
 
-	if (++state.hue == 256)
-	    state.hue = 0;
-
-	hueToRGB(&state, 255);
-
-	for (uint16_t i = 0; i < strip.numPixels(); ++i) {
-	    strip.setPixelColor(i, state.red, state.green, state.blue);
+	if (state.pixel == 0) {
+	    if (++state.hue == 256)
+		state.hue = 0;
+	    hueToRGB(&state, 255);
 	}
 
-	strip.show();
-	delay(20);
+	strip.setPixelColor(state.pixel, state.red, state.green, state.blue);
+	if (++state.pixel == strip.numPixels())
+	    state.pixel = 0;
+
+	PORTB |= _BV(4);
+	strip.show(); // this runs with interrupts disabled
+	PORTB &= ~_BV(4);
     }
 }
 
